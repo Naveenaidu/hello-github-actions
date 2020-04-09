@@ -2,77 +2,74 @@
 
 set -e
 
-sh -c "echo Hello world my name is $INPUT_MY_NAME"
+PR_NUMBER=$(jq -r ".issue.number" "$GITHUB_EVENT_PATH")
+echo "Collecting information about PR #$PR_NUMBER of $GITHUB_REPOSITORY..."
 
+if [[ -z "$GITHUB_TOKEN" ]]; then
+	echo "Set the GITHUB_TOKEN env variable."
+	exit 1
+fi
 
-# PR_NUMBER=$(jq -r ".issue.number" "$GITHUB_EVENT_PATH")
-# echo "Collecting information about PR #$PR_NUMBER of $GITHUB_REPOSITORY..."
+URI=https://api.github.com
+API_HEADER="Accept: application/vnd.github.v3+json"
+AUTH_HEADER="Authorization: token $GITHUB_TOKEN"
 
-# if [[ -z "$GITHUB_TOKEN" ]]; then
-# 	echo "Set the GITHUB_TOKEN env variable."
-# 	exit 1
-# fi
+pr_resp=$(curl -X GET -s -H "${AUTH_HEADER}" -H "${API_HEADER}" \
+          "${URI}/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")
 
-# URI=https://api.github.com
-# API_HEADER="Accept: application/vnd.github.v3+json"
-# AUTH_HEADER="Authorization: token $GITHUB_TOKEN"
+BASE_REPO=$(echo "$pr_resp" | jq -r .base.repo.full_name)
+BASE_BRANCH=$(echo "$pr_resp" | jq -r .base.ref)
 
-# pr_resp=$(curl -X GET -s -H "${AUTH_HEADER}" -H "${API_HEADER}" \
-#           "${URI}/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")
+USER_LOGIN=$(jq -r ".comment.user.login" "$GITHUB_EVENT_PATH")
 
-# BASE_REPO=$(echo "$pr_resp" | jq -r .base.repo.full_name)
-# BASE_BRANCH=$(echo "$pr_resp" | jq -r .base.ref)
+user_resp=$(curl -X GET -s -H "${AUTH_HEADER}" -H "${API_HEADER}" \
+            "${URI}/users/${USER_LOGIN}")
 
-# USER_LOGIN=$(jq -r ".comment.user.login" "$GITHUB_EVENT_PATH")
+USER_NAME=$(echo "$user_resp" | jq -r ".name")
+if [[ "$USER_NAME" == "null" ]]; then
+	USER_NAME=$USER_LOGIN
+fi
+USER_NAME="${USER_NAME} (Rebase PR Action)"
 
-# user_resp=$(curl -X GET -s -H "${AUTH_HEADER}" -H "${API_HEADER}" \
-#             "${URI}/users/${USER_LOGIN}")
+USER_EMAIL=$(echo "$user_resp" | jq -r ".email")
+if [[ "$USER_EMAIL" == "null" ]]; then
+	USER_EMAIL="$USER_LOGIN@users.noreply.github.com"
+fi
 
-# USER_NAME=$(echo "$user_resp" | jq -r ".name")
-# if [[ "$USER_NAME" == "null" ]]; then
-# 	USER_NAME=$USER_LOGIN
-# fi
-# USER_NAME="${USER_NAME} (Rebase PR Action)"
+if [[ "$(echo "$pr_resp" | jq -r .rebaseable)" != "true" ]]; then
+	echo "GitHub doesn't think that the PR is rebaseable!"
+	exit 1
+fi
 
-# USER_EMAIL=$(echo "$user_resp" | jq -r ".email")
-# if [[ "$USER_EMAIL" == "null" ]]; then
-# 	USER_EMAIL="$USER_LOGIN@users.noreply.github.com"
-# fi
+if [[ -z "$BASE_BRANCH" ]]; then
+	echo "Cannot get base branch information for PR #$PR_NUMBER!"
+	echo "API response: $pr_resp"
+	exit 1
+fi
 
-# if [[ "$(echo "$pr_resp" | jq -r .rebaseable)" != "true" ]]; then
-# 	echo "GitHub doesn't think that the PR is rebaseable!"
-# 	exit 1
-# fi
+HEAD_REPO=$(echo "$pr_resp" | jq -r .head.repo.full_name)
+HEAD_BRANCH=$(echo "$pr_resp" | jq -r .head.ref)
 
-# if [[ -z "$BASE_BRANCH" ]]; then
-# 	echo "Cannot get base branch information for PR #$PR_NUMBER!"
-# 	echo "API response: $pr_resp"
-# 	exit 1
-# fi
+echo "Base branch for PR #$PR_NUMBER is $BASE_BRANCH"
 
-# HEAD_REPO=$(echo "$pr_resp" | jq -r .head.repo.full_name)
-# HEAD_BRANCH=$(echo "$pr_resp" | jq -r .head.ref)
+USER_TOKEN=${USER_LOGIN}_TOKEN
+COMMITTER_TOKEN=${!USER_TOKEN:-$GITHUB_TOKEN}
 
-# echo "Base branch for PR #$PR_NUMBER is $BASE_BRANCH"
+git remote set-url origin https://x-access-token:$COMMITTER_TOKEN@github.com/$GITHUB_REPOSITORY.git
+git config --global user.email "$USER_EMAIL"
+git config --global user.name "$USER_NAME"
 
-# USER_TOKEN=${USER_LOGIN}_TOKEN
-# COMMITTER_TOKEN=${!USER_TOKEN:-$GITHUB_TOKEN}
+git remote add fork https://x-access-token:$COMMITTER_TOKEN@github.com/$HEAD_REPO.git
 
-# git remote set-url origin https://x-access-token:$COMMITTER_TOKEN@github.com/$GITHUB_REPOSITORY.git
-# git config --global user.email "$USER_EMAIL"
-# git config --global user.name "$USER_NAME"
+set -o xtrace
 
-# git remote add fork https://x-access-token:$COMMITTER_TOKEN@github.com/$HEAD_REPO.git
+# make sure branches are up-to-date
+git fetch origin $BASE_BRANCH
+git fetch fork $HEAD_BRANCH
 
-# set -o xtrace
+# do the rebase
+git checkout -b $HEAD_BRANCH fork/$HEAD_BRANCH
+git rebase origin/$BASE_BRANCH
 
-# # make sure branches are up-to-date
-# git fetch origin $BASE_BRANCH
-# git fetch fork $HEAD_BRANCH
-
-# # do the rebase
-# git checkout -b $HEAD_BRANCH fork/$HEAD_BRANCH
-# git rebase origin/$BASE_BRANCH
-
-# # push back
-# git push --force-with-lease fork $HEAD_BRANCH
+# push back
+git push --force-with-lease fork $HEAD_BRANCH
